@@ -4,7 +4,7 @@ import { tunnel } from "cloudflared";
 import { execSync } from "child_process";
 import { randomBytes } from "crypto";
 
-const SOFTPEACH_URL = process.env.SOFTPEACH_URL || "https://softpeach.onrender.com";
+const SOFTPEACH_URL = process.env.SOFTPEACH_URL || "https://softpeach-w2zu.onrender.com";
 
 function printBanner() {
   console.log("");
