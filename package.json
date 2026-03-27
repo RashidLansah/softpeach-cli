@@ -1,6 +1,6 @@
 {
   "name": "softpeach-cli",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Share your localhost with your team for design review on SoftPeach",
   "type": "module",
   "bin": {
