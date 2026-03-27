@@ -1,13 +1,19 @@
 {
   "name": "softpeach-cli",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Share your localhost with your team for design review on SoftPeach",
+  "type": "module",
   "bin": {
-    "softpeach": "./bin/softpeach.mjs"
+    "softpeach-cli": "bin/softpeach.mjs"
   },
+  "files": ["bin"],
   "keywords": ["design-review", "collaboration", "localhost", "tunnel", "softpeach"],
   "author": "Rashid Lansah",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RashidLansah/softpeach-cli"
+  },
   "dependencies": {
     "cloudflared": "^0.5.0"
   }
