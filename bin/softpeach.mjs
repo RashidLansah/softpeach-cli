@@ -102,11 +102,23 @@ async function main() {
 
     const tunnelUrl = await url;
 
-    // Wait for at least one connection to be ready
-    const firstConnection = await Promise.race([
-      connections.then(conns => conns),
-      new Promise(resolve => setTimeout(() => resolve(null), 5000))
-    ]);
+    // Wait for tunnel to be actually routable before opening browser
+    console.log(`  \x1b[36m⟳\x1b[0m Waiting for tunnel to be reachable...`);
+    let tunnelReady = false;
+    for (let i = 0; i < 15; i++) {
+      try {
+        const check = await fetch(tunnelUrl, { signal: AbortSignal.timeout(3000), redirect: "follow" });
+        if (check.ok || check.status < 500) {
+          tunnelReady = true;
+          break;
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    if (!tunnelReady) {
+      console.log(`  \x1b[33m⚠\x1b[0m Tunnel URL may not be ready yet, opening anyway...`);
+    }
 
     console.log(`  \x1b[32m✓\x1b[0m Tunnel ready: \x1b[4m${tunnelUrl}\x1b[0m`);
     console.log("");
