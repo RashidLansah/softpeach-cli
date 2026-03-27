@@ -3,8 +3,57 @@
 import { tunnel } from "cloudflared";
 import { execSync } from "child_process";
 import { randomBytes } from "crypto";
+import http from "http";
 
 const SOFTPEACH_URL = process.env.SOFTPEACH_URL || "https://softpeach-w2zu.onrender.com";
+
+// Script injected into HTML responses to enable SoftPeach features:
+// - Scroll position reporting via postMessage
+// - Scroll-to command handling (click comment in sidebar → scroll to it)
+// - Element context queries (for AI prompt generation)
+const HELPER_SCRIPT = `<script data-softpeach-helper>
+(function(){
+  var lx=-1,ly=-1;
+  function report(){
+    var sx=window.scrollX||window.pageXOffset||0;
+    var sy=window.scrollY||window.pageYOffset||0;
+    var cw=document.documentElement.scrollWidth;
+    var ch=document.documentElement.scrollHeight;
+    if(sx!==lx||sy!==ly){
+      lx=sx;ly=sy;
+      parent.postMessage({type:"softpeach-scroll",scrollX:sx,scrollY:sy,contentWidth:cw,contentHeight:ch},"*");
+    }
+    requestAnimationFrame(report);
+  }
+  requestAnimationFrame(report);
+  window.addEventListener("load",function(){
+    setTimeout(function(){
+      var sx=window.scrollX||0,sy=window.scrollY||0;
+      parent.postMessage({type:"softpeach-scroll",scrollX:sx,scrollY:sy,
+        contentWidth:document.documentElement.scrollWidth,
+        contentHeight:document.documentElement.scrollHeight},"*");
+    },100);
+  });
+  window.addEventListener("message",function(e){
+    if(!e.data)return;
+    if(e.data.type==="softpeach-scroll-to"){
+      window.scrollTo({left:e.data.scrollX||0,top:e.data.scrollY||0,behavior:"smooth"});
+    }
+    if(e.data.type==="softpeach-element-query"){
+      var el=document.elementFromPoint(e.data.x,e.data.y);
+      var ctx="";
+      if(el){
+        var tag=el.tagName.toLowerCase();
+        var txt=(el.textContent||"").trim().substring(0,50);
+        var sec=el.closest("section,main,header,footer,nav,aside,article");
+        var sid=sec?(sec.tagName.toLowerCase()+(sec.id?"#"+sec.id:sec.className?" ."+sec.className.split(" ")[0]:"")):"";
+        ctx="<"+tag+">"+(txt?' "'+txt+'"':"")+(sid?" in <"+sid+">":"");
+      }
+      parent.postMessage({type:"softpeach-element-result",id:e.data.id,context:ctx},"*");
+    }
+  });
+})();
+</script>`;
 
 function printBanner() {
   console.log("");
@@ -43,6 +92,82 @@ function openBrowser(url) {
 
 function generateRoomId() {
   return randomBytes(4).toString("hex");
+}
+
+/**
+ * Creates a local HTTP proxy that forwards requests to the target port
+ * and injects the SoftPeach helper script into HTML responses.
+ * This enables scroll tracking, click-to-scroll, and element context
+ * detection when the page is loaded in SoftPeach's iframe.
+ */
+function createInjectingProxy(targetPort) {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer(async (req, res) => {
+      const targetUrl = `http://localhost:${targetPort}${req.url}`;
+
+      try {
+        // Collect request body for non-GET requests
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+
+        // Forward headers, fixing the host
+        const headers = { ...req.headers, host: `localhost:${targetPort}` };
+        delete headers["accept-encoding"]; // Don't accept compressed responses — we need to read HTML
+
+        const resp = await fetch(targetUrl, {
+          method: req.method,
+          headers,
+          body,
+          redirect: "follow",
+        });
+
+        const contentType = resp.headers.get("content-type") || "";
+
+        if (contentType.includes("text/html")) {
+          let html = await resp.text();
+
+          // Inject helper script — before </head> if possible, otherwise before </body>
+          if (html.includes("</head>")) {
+            html = html.replace("</head>", HELPER_SCRIPT + "</head>");
+          } else if (html.includes("</body>")) {
+            html = html.replace("</body>", HELPER_SCRIPT + "</body>");
+          } else if (html.includes("</HEAD>")) {
+            html = html.replace("</HEAD>", HELPER_SCRIPT + "</HEAD>");
+          } else {
+            html += HELPER_SCRIPT;
+          }
+
+          // Forward relevant response headers
+          const respHeaders = { "content-type": contentType };
+          const cacheControl = resp.headers.get("cache-control");
+          if (cacheControl) respHeaders["cache-control"] = cacheControl;
+
+          res.writeHead(resp.status, respHeaders);
+          res.end(html);
+        } else {
+          // Non-HTML: proxy as-is
+          const buffer = Buffer.from(await resp.arrayBuffer());
+          const respHeaders = { "content-type": contentType };
+          const cacheControl = resp.headers.get("cache-control");
+          if (cacheControl) respHeaders["cache-control"] = cacheControl;
+
+          res.writeHead(resp.status, respHeaders);
+          res.end(buffer);
+        }
+      } catch (err) {
+        res.writeHead(502, { "content-type": "text/plain" });
+        res.end(`SoftPeach proxy error: ${err.message}`);
+      }
+    });
+
+    server.listen(0, "127.0.0.1", () => {
+      const proxyPort = server.address().port;
+      resolve({ proxyPort, server });
+    });
+
+    server.on("error", reject);
+  });
 }
 
 async function main() {
@@ -95,10 +220,25 @@ async function main() {
     console.log("");
   }
 
+  // Start local proxy that injects SoftPeach helper script
+  console.log("  \x1b[36m⟳\x1b[0m Starting helper proxy...");
+  let proxyPort;
+  let proxyServer;
+  try {
+    const proxy = await createInjectingProxy(port);
+    proxyPort = proxy.proxyPort;
+    proxyServer = proxy.server;
+    console.log(`  \x1b[32m✓\x1b[0m Helper proxy running on port ${proxyPort}`);
+  } catch (err) {
+    console.error(`  \x1b[31m✗ Failed to start helper proxy:\x1b[0m ${err.message}`);
+    process.exit(1);
+  }
+
   console.log("  \x1b[36m⟳\x1b[0m Starting tunnel...");
 
   try {
-    const { url, stop, connections } = tunnel({ "--url": `http://localhost:${port}` });
+    // Tunnel to the proxy, not directly to the dev server
+    const { url, stop, connections } = tunnel({ "--url": `http://localhost:${proxyPort}` });
 
     const tunnelUrl = await url;
 
@@ -143,14 +283,16 @@ async function main() {
 
     // Keep the process alive until interrupted
     process.on("SIGINT", () => {
-      console.log("\n  \x1b[33m■\x1b[0m Shutting down tunnel...");
+      console.log("\n  \x1b[33m■\x1b[0m Shutting down...");
       stop();
+      proxyServer.close();
       console.log("  \x1b[32m✓\x1b[0m Done. Thanks for using SoftPeach!\n");
       process.exit(0);
     });
 
     process.on("SIGTERM", () => {
       stop();
+      proxyServer.close();
       process.exit(0);
     });
 
@@ -158,6 +300,7 @@ async function main() {
     await new Promise(() => {});
 
   } catch (err) {
+    proxyServer.close();
     console.error(`\n  \x1b[31m✗ Failed to start tunnel:\x1b[0m ${err.message}`);
     console.log("");
     console.log("  \x1b[2mMake sure cloudflared is accessible. You can install it:\x1b[0m");
